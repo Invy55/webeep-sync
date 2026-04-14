@@ -181,7 +181,12 @@ export class DownloadManager extends EventEmitter {
           headers: { cookie },
           hooks: {
             // Re-attach session cookie on every redirect hop (redirect trap)
-            beforeRedirect: [(opts: any) => { opts.headers["cookie"] = cookie }],
+            beforeRedirect: [
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (opts: any) => {
+                opts.headers["cookie"] = cookie
+              },
+            ],
           },
         })
 
@@ -200,14 +205,25 @@ export class DownloadManager extends EventEmitter {
 
         // if size is unknown, fetch it in the background so the UI doesn't freeze while waiting for the response
         if (file.filesize === 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const sizeReq = (got.stream as any)(file.fileurl, {
             headers: { cookie, range: "bytes=0-0" },
-            hooks: { beforeRedirect: [(opts: any) => { opts.headers["cookie"] = cookie }] },
+            hooks: {
+              beforeRedirect: [
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (opts: any) => {
+                  opts.headers["cookie"] = cookie
+                },
+              ],
+            },
             timeout: { request: 10000 },
           })
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           sizeReq.once("response", (resp: any) => {
             const contentRange: string = resp.headers["content-range"] ?? ""
-            const size = contentRange ? parseInt(contentRange.split("/").pop(), 10) : 0
+            const size = contentRange
+              ? parseInt(contentRange.split("/").pop(), 10)
+              : 0
             if (!isNaN(size) && size > 0) {
               this.total += size
               download.progress.total = size
@@ -293,7 +309,10 @@ export class DownloadManager extends EventEmitter {
         const filesize =
           file.filesize > 0
             ? file.filesize
-            : await fs.stat(absolutePath).then(s => s.size).catch(() => 0)
+            : await fs
+                .stat(absolutePath)
+                .then(s => s.size)
+                .catch(() => 0)
 
         if (!newFilesList[file.coursename]) newFilesList[file.coursename] = []
         newFilesList[file.coursename].push({

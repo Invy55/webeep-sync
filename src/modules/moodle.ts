@@ -71,7 +71,12 @@ export class MoodleClient extends EventEmitter {
           this.emit("username", loginManager.username)
         }
         this.getNotifications()
-        setInterval(() => { this.getNotifications() }, 1000 * 60 * 2)
+        setInterval(
+          () => {
+            this.getNotifications()
+          },
+          1000 * 60 * 2,
+        )
       }
     })
     loginManager.on("session", () => {
@@ -117,6 +122,7 @@ export class MoodleClient extends EventEmitter {
      * UUID for logging, if not specified a new one will be generated, passed only when retrying
      */
     callUID = generateUID(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any> {
     debug(`API call [${callUID}] to function: ${wsfunction}`)
     if (data) debug(`    data: ${JSON.stringify(data)}`)
@@ -198,11 +204,12 @@ export class MoodleClient extends EventEmitter {
     // fetch upfront (but can obtain from notifications).
     // core_course_get_enrolled_courses_by_timeline_classification is ajax:true and is
     // the preferred way mandated by Her Highness Polimi (and it also works without a userid).
-    const res: { courses: { fullname: string; id: number }[] } = await this.call(
-      "core_course_get_enrolled_courses_by_timeline_classification",
-      { classification: "all", limit: 0, offset: 0 },
-      catchNetworkError,
-    )
+    const res: { courses: { fullname: string; id: number }[] } =
+      await this.call(
+        "core_course_get_enrolled_courses_by_timeline_classification",
+        { classification: "all", limit: 0, offset: 0 },
+        catchNetworkError,
+      )
     const courses = res?.courses ?? []
     const defaultNames = courses.map(c => getDefaultName(c.fullname))
     const c: Course[] = courses.map((c, i) => {
@@ -305,7 +312,12 @@ export class MoodleClient extends EventEmitter {
 
     const cookie = `MoodleSession=${loginManager.moodleSession}`
     // Re-attach the session cookie on every redirect hop (redirect trap)
-    const cookieHook = [(opts: any) => { opts.headers["cookie"] = cookie }]
+    const cookieHook = [
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (opts: any) => {
+        opts.headers["cookie"] = cookie
+      },
+    ]
     const baseOpts = {
       headers: { cookie },
       hooks: { beforeRedirect: cookieHook },
@@ -315,139 +327,178 @@ export class MoodleClient extends EventEmitter {
     // collect all file infos in parallel, deduplicate at the end
     const undeduped: FileInfo[] = []
 
-    await Promise.all(state.cm.map(async cm => {
-      if (!cm.uservisible || !cm.url) return
+    await Promise.all(
+      state.cm.map(async cm => {
+        if (!cm.uservisible || !cm.url) return
 
-      // sectionid is the primary field; section is a legacy fallback seen on some courses
-      const cmSectionId = cm.sectionid ?? cm.section
-      const sectionTitle = sectionTitles.get(cmSectionId) ?? sectionTitles.get(String(cmSectionId)) ?? ""
-      // courses where the section is named 'Materiali' or similar skip the section subfolder
-      const basepath = sanitizePath(
-        sectionTitle.toLowerCase().includes("material")
-          ? course.name
-          : path.join(course.name, sectionTitle),
-      )
+        // sectionid is the primary field; section is a legacy fallback seen on some courses
+        const cmSectionId = cm.sectionid ?? cm.section
+        const sectionTitle =
+          sectionTitles.get(cmSectionId) ??
+          sectionTitles.get(String(cmSectionId)) ??
+          ""
+        // courses where the section is named 'Materiali' or similar skip the section subfolder
+        const basepath = sanitizePath(
+          sectionTitle.toLowerCase().includes("material")
+            ? course.name
+            : path.join(course.name, sectionTitle),
+        )
 
-      if (["resource", "risorsa"].includes(cm.modname.toLowerCase())) {
-        try {
-          const moduleUrl = cm.url.replace(/&amp;/g, "&")
-          const resp = await got.head(moduleUrl, baseOpts)
-          let fileurl = resp.url
+        if (["resource", "risorsa"].includes(cm.modname.toLowerCase())) {
+          try {
+            const moduleUrl = cm.url.replace(/&amp;/g, "&")
+            const resp = await got.head(moduleUrl, baseOpts)
+            let fileurl = resp.url
 
-          if (!fileurl.includes("pluginfile.php")) {
-            // Embedded file: the redirect landed on a page, parse it for the real link
-            const page = await got(moduleUrl, baseOpts)
-            const match =
-              page.body.match(/<object[^>]+data="([^"]*pluginfile\.php[^"]*)"/) ??
-              page.body.match(/<a[^>]+href="([^"]*pluginfile\.php[^"]*)"/)
-            if (!match) {
-              debug(`getFileInfos: no pluginfile link in "${cm.name}", skipping`)
-              return
+            if (!fileurl.includes("pluginfile.php")) {
+              // Embedded file: the redirect landed on a page, parse it for the real link
+              const page = await got(moduleUrl, baseOpts)
+              const match =
+                page.body.match(
+                  /<object[^>]+data="([^"]*pluginfile\.php[^"]*)"/,
+                ) ??
+                page.body.match(/<a[^>]+href="([^"]*pluginfile\.php[^"]*)"/)
+              if (!match) {
+                debug(
+                  `getFileInfos: no pluginfile link in "${cm.name}", skipping`,
+                )
+                return
+              }
+              fileurl = match[1].replace(/&amp;/g, "&")
             }
-            fileurl = match[1].replace(/&amp;/g, "&")
+
+            const lastMod = resp.headers["last-modified"]
+            const timemodified = lastMod
+              ? Math.floor(new Date(lastMod).getTime() / 1000)
+              : 0
+
+            // use module display name + extension from Content-Type (original behaviour)
+            const contentType = (resp.headers["content-type"] ?? "")
+              .split(";")[0]
+              .trim()
+            const ext = contentType
+              ? "." + (mimeExtension(contentType) || "")
+              : ""
+            const filename = sanitizePath(
+              (cm.name + ext).replace(/[/\\]/g, "_"),
+            )
+
+            // filesize is 0 here, fetched lazily during download for live progress updates
+            undeduped.push({
+              coursename: course.name,
+              filename,
+              filepath: basepath,
+              filesize: 0,
+              fileurl,
+              timecreated: timemodified,
+              timemodified,
+            })
+          } catch (e) {
+            debug(
+              `getFileInfos: failed to resolve resource "${cm.name}": ${e.message}`,
+            )
           }
+        } else if (["folder", "cartella"].includes(cm.modname.toLowerCase())) {
+          try {
+            const folderUrl = cm.url.replace(/&amp;/g, "&")
+            const page = await got(folderUrl, baseOpts)
+            const folderPath = sanitizePath(path.join(basepath, cm.name))
 
-          const lastMod = resp.headers["last-modified"]
-          const timemodified = lastMod ? Math.floor(new Date(lastMod).getTime() / 1000) : 0
+            const linkRe =
+              /href="(https?:\/\/[^"]*pluginfile\.php[^"]*forcedownload=1[^"]*)"/g
+            const folderFileUrls: string[] = []
+            let match
+            while ((match = linkRe.exec(page.body)) !== null) {
+              folderFileUrls.push(match[1].replace(/&amp;/g, "&"))
+            }
 
-          // use module display name + extension from Content-Type (original behaviour)
-          const contentType = (resp.headers["content-type"] ?? "").split(";")[0].trim()
-          const ext = contentType ? "." + (mimeExtension(contentType) || "") : ""
-          const filename = sanitizePath((cm.name + ext).replace(/[/\\]/g, "_"))
+            await Promise.all(
+              folderFileUrls.map(async fileurl => {
+                // Use stream + early abort so we only read headers, never the body.
+                // A plain got() call with Range would download the full file if the server
+                // ignores the Range header and responds with 200.
+                const { filesize, timemodified } = await new Promise<{
+                  filesize: number
+                  timemodified: number
+                }>((resolve, reject) => {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const req = (got.stream as any)(fileurl, {
+                    ...baseOpts,
+                    headers: { ...baseOpts.headers, range: "bytes=0-0" },
+                  })
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  req.once("response", (resp: any) => {
+                    const contentRange: string =
+                      resp.headers["content-range"] ?? ""
+                    const filesize = contentRange
+                      ? parseInt(contentRange.split("/").pop(), 10)
+                      : 0
+                    const lastMod: string = resp.headers["last-modified"] ?? ""
+                    const timemodified = lastMod
+                      ? Math.floor(new Date(lastMod).getTime() / 1000)
+                      : 0
+                    req.destroy()
+                    resolve({
+                      filesize: isNaN(filesize) ? 0 : filesize,
+                      timemodified,
+                    })
+                  })
+                  req.once("error", (e: Error) => {
+                    // ignore body-abort errors triggered by destroy()
+                    if (
+                      e.message?.includes("aborted") ||
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      (e as any).code === "ERR_STREAM_DESTROYED"
+                    ) {
+                      resolve({ filesize: 0, timemodified: 0 })
+                    } else {
+                      reject(e)
+                    }
+                  })
+                }).catch(e => {
+                  debug(
+                    `getFileInfos: range request failed for ${fileurl}: ${e.message}`,
+                  )
+                  return { filesize: 0, timemodified: 0 }
+                })
 
-          // filesize is 0 here, fetched lazily during download for live progress updates
-          undeduped.push({
-            coursename: course.name,
-            filename,
-            filepath: basepath,
-            filesize: 0,
-            fileurl,
-            timecreated: timemodified,
-            timemodified,
-          })
-        } catch (e) {
-          debug(`getFileInfos: failed to resolve resource "${cm.name}": ${e.message}`)
-        }
-      } else if (["folder", "cartella"].includes(cm.modname.toLowerCase())) {
-        try {
-          const folderUrl = cm.url.replace(/&amp;/g, "&")
-          const page = await got(folderUrl, baseOpts)
-          const folderPath = sanitizePath(path.join(basepath, cm.name))
+                const filename = sanitizePath(
+                  decodeURIComponent(
+                    path.basename(new URL(fileurl).pathname),
+                  ).replace(/[/\\]/g, "_"),
+                )
 
-          const linkRe = /href="(https?:\/\/[^"]*pluginfile\.php[^"]*forcedownload=1[^"]*)"/g
-          const folderFileUrls: string[] = []
-          let match
-          while ((match = linkRe.exec(page.body)) !== null) {
-            folderFileUrls.push(match[1].replace(/&amp;/g, "&"))
+                undeduped.push({
+                  coursename: course.name,
+                  filename,
+                  filepath: folderPath,
+                  filesize,
+                  fileurl,
+                  timecreated: timemodified,
+                  timemodified,
+                })
+              }),
+            )
+          } catch (e) {
+            debug(
+              `getFileInfos: failed to parse folder "${cm.name}": ${e.message}`,
+            )
           }
-
-          await Promise.all(
-            folderFileUrls.map(async fileurl => {
-              // Use stream + early abort so we only read headers, never the body.
-              // A plain got() call with Range would download the full file if the server
-              // ignores the Range header and responds with 200.
-              const { filesize, timemodified } = await new Promise<{
-                filesize: number
-                timemodified: number
-              }>((resolve, reject) => {
-                const req = (got.stream as any)(fileurl, {
-                  ...baseOpts,
-                  headers: { ...baseOpts.headers, range: "bytes=0-0" },
-                })
-                req.once("response", (resp: any) => {
-                  const contentRange: string = resp.headers["content-range"] ?? ""
-                  const filesize = contentRange
-                    ? parseInt(contentRange.split("/").pop(), 10)
-                    : 0
-                  const lastMod: string = resp.headers["last-modified"] ?? ""
-                  const timemodified = lastMod
-                    ? Math.floor(new Date(lastMod).getTime() / 1000)
-                    : 0
-                  req.destroy()
-                  resolve({ filesize: isNaN(filesize) ? 0 : filesize, timemodified })
-                })
-                req.once("error", (e: Error) => {
-                  // ignore body-abort errors triggered by destroy()
-                  if (e.message?.includes("aborted") || (e as any).code === "ERR_STREAM_DESTROYED") {
-                    resolve({ filesize: 0, timemodified: 0 })
-                  } else {
-                    reject(e)
-                  }
-                })
-              }).catch(e => {
-                debug(`getFileInfos: range request failed for ${fileurl}: ${e.message}`)
-                return { filesize: 0, timemodified: 0 }
-              })
-
-              const filename = sanitizePath(
-                decodeURIComponent(path.basename(new URL(fileurl).pathname)).replace(/[/\\]/g, "_"),
-              )
-
-              undeduped.push({
-                coursename: course.name,
-                filename,
-                filepath: folderPath,
-                filesize,
-                fileurl,
-                timecreated: timemodified,
-                timemodified,
-              })
-            }),
-          )
-        } catch (e) {
-          debug(`getFileInfos: failed to parse folder "${cm.name}": ${e.message}`)
         }
-      }
-    }))
+      }),
+    )
 
     // deduplicate filenames per-directory after all parallel requests complete
     const files: FileInfo[] = []
     for (const file of undeduped) {
       let i = 1
       let deduped = file.filename
-      while (files.find(f => f.filepath === file.filepath && f.filename === deduped)) {
+      while (
+        files.find(f => f.filepath === file.filepath && f.filename === deduped)
+      ) {
         const base = path.basename(file.filename, path.extname(file.filename))
-        const trimmed = i > 1 ? base.slice(0, -(3 + String(i - 1).length)) : base
+        const trimmed =
+          i > 1 ? base.slice(0, -(3 + String(i - 1).length)) : base
         deduped = `${trimmed} (${i})${path.extname(file.filename)}`
         i++
       }

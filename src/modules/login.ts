@@ -68,7 +68,8 @@ class LoginManager extends EventEmitter {
       domain: "webeep.polimi.it",
     })
     const moodleSession = cookies[0]?.value
-    if (!moodleSession) throw new Error("MoodleSession cookie not found after login")
+    if (!moodleSession)
+      throw new Error("MoodleSession cookie not found after login")
 
     // M.cfg is Moodle's global JS config object injected into every page.
     // sesskey is required for every call to lib/ajax/service.php.
@@ -90,7 +91,9 @@ class LoginManager extends EventEmitter {
     const username = fullnameRaw
       ? fullnameRaw.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())
       : undefined
-    debug(`extractAndSaveSession: username=${username} sesskey=${sesskey?.slice(0, 6)}... sessiontimeout=${sessiontimeout}`)
+    debug(
+      `extractAndSaveSession: username=${username} sesskey=${sesskey?.slice(0, 6)}... sessiontimeout=${sessiontimeout}`,
+    )
 
     this.moodleSession = moodleSession
     this.sesskey = sesskey
@@ -101,7 +104,10 @@ class LoginManager extends EventEmitter {
     // sessiontimeout is in seconds; * 1000 converts to ms to match Date.now(). Fallback 28800s = 8h.
     const expiresAt = Date.now() + (sessiontimeout ?? 28800) * 1000
     const data: StoredSession = { moodleSession, sesskey, expiresAt, username }
-    await fs.writeFile(sessionPath, safeStorage.encryptString(JSON.stringify(data)))
+    await fs.writeFile(
+      sessionPath,
+      safeStorage.encryptString(JSON.stringify(data)),
+    )
   }
 
   /**
