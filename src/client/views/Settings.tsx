@@ -208,10 +208,13 @@ export const SettingsModal: FC<{ onClose: () => void }> = props => {
           </button>
 
           <span className="credits">
-            <span>v{version}</span>
+            <span>v{version} Resistance</span>
             <br />
             Developed by Tommaso Morganti •{" "}
             <Link href="https://github.com/toto04">GitHub</Link>
+            <br />
+            Resistance by Marco •{" "}
+            <Link href="https://github.com/invy55">GitHub</Link>
             <br />
             <Link href="https://github.com/toto04/webeep-sync">
               Source code

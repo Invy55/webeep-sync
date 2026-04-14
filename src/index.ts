@@ -87,7 +87,7 @@ async function setLoginItem(openAtLogin: boolean) {
   }
 }
 
-loginManager.on("token", async () => {
+loginManager.on("session", async () => {
   send("is-logged", true)
   send("courses", await moodleClient.getCoursesWithoutCache())
 })

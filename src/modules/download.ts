@@ -173,10 +173,15 @@ export class DownloadManager extends EventEmitter {
         const absolutePath = path.join(downloadPath, fullpath)
 
         // make the request to get the file
+        // pluginfile.php requires the MoodleSession cookie for auth; the old wstoken query
+        // param no longer works since the mobile app token flow was removed.
         const reqAc = new AbortController()
+        const cookie = `MoodleSession=${loginManager.moodleSession}`
         const request = got.stream(file.fileurl, {
-          searchParams: {
-            token: loginManager.token, // for some god forsaken reason it's token and not wstoken
+          headers: { cookie },
+          hooks: {
+            // Re-attach session cookie on every redirect hop (redirect trap)
+            beforeRedirect: [(opts: any) => { opts.headers["cookie"] = cookie }],
           },
         })
 
@@ -192,6 +197,25 @@ export class DownloadManager extends EventEmitter {
           },
         }
         this.currentDownloads.push(download)
+
+        // if size is unknown, fetch it in the background so the UI doesn't freeze while waiting for the response
+        if (file.filesize === 0) {
+          const sizeReq = (got.stream as any)(file.fileurl, {
+            headers: { cookie, range: "bytes=0-0" },
+            hooks: { beforeRedirect: [(opts: any) => { opts.headers["cookie"] = cookie }] },
+            timeout: { request: 10000 },
+          })
+          sizeReq.once("response", (resp: any) => {
+            const contentRange: string = resp.headers["content-range"] ?? ""
+            const size = contentRange ? parseInt(contentRange.split("/").pop(), 10) : 0
+            if (!isNaN(size) && size > 0) {
+              this.total += size
+              download.progress.total = size
+            }
+            sizeReq.destroy()
+          })
+          sizeReq.once("error", () => {}) // ignore
+        }
 
         request.on("downloadProgress", ({ transferred }) => {
           // update the download object on each chunk
@@ -265,15 +289,21 @@ export class DownloadManager extends EventEmitter {
           throw new FSError() // unifies all possible errors to an FSError
         }
 
+        // For files whose size was unknown at scan time, read it from disk after download.
+        const filesize =
+          file.filesize > 0
+            ? file.filesize
+            : await fs.stat(absolutePath).then(s => s.size).catch(() => 0)
+
         if (!newFilesList[file.coursename]) newFilesList[file.coursename] = []
         newFilesList[file.coursename].push({
           filename: file.filename,
           absolutePath,
-          filesize: file.filesize,
+          filesize,
           updated: file.updating ?? false,
         })
 
-        this.totalUntilNow += file.filesize
+        this.totalUntilNow += filesize
         const idx = this.currentDownloads.indexOf(download)
         if (idx !== -1) this.currentDownloads.splice(idx, 1)
         if (files.length) await pushNewRequest()

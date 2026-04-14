@@ -1,24 +1,13 @@
 import path from "path"
 import { EventEmitter } from "events"
 import got from "got"
+import { extension as mimeExtension } from "mime-types"
 import { createLogger } from "./logger"
 import { loginManager } from "./login"
 import { storeIsReady, store } from "./store"
 import { generateUID, sanitizePath } from "../util"
 
 const { log, debug } = createLogger("MoodleClient")
-
-/** module name to be excluded from file search to prevent download of junk */
-export const EXCLUDED_MODNAMES = [
-  "page",
-  "forum",
-  "url",
-  "wooclap",
-  "choice",
-  "feedback",
-  "label",
-  "lesson",
-]
 
 export interface Course {
   id: number
@@ -37,19 +26,6 @@ export interface FileInfo {
   timemodified: number
   updating?: boolean // set to true if the file is already downloaded, and is being updated
 }
-
-export type Contents = {
-  id: number
-  name: string
-  modules: {
-    id: number
-    name: string
-    modname: string
-    contents?: ({
-      type: string
-    } & FileInfo)[]
-  }[]
-}[]
 
 export type MoodleNotification = {
   id: number
@@ -78,8 +54,8 @@ export declare interface MoodleClient {
   ): this
 }
 export class MoodleClient extends EventEmitter {
-  userid?: number
   username?: string
+  userid?: number
   connected = true
 
   waitingForCourses = false
@@ -89,17 +65,20 @@ export class MoodleClient extends EventEmitter {
   constructor() {
     super()
     loginManager.once("ready", () => {
-      if (loginManager.isLogged)
-        this.getUserID().then(() => {
-          // update the notification cache every 2 minutes
-          this.getNotifications()
-          setInterval(
-            () => {
-              this.getNotifications()
-            },
-            1000 * 60 * 2,
-          )
-        })
+      if (loginManager.isLogged) {
+        if (loginManager.username) {
+          this.username = loginManager.username
+          this.emit("username", loginManager.username)
+        }
+        this.getNotifications()
+        setInterval(() => { this.getNotifications() }, 1000 * 60 * 2)
+      }
+    })
+    loginManager.on("session", () => {
+      if (loginManager.username) {
+        this.username = loginManager.username
+        this.emit("username", loginManager.username)
+      }
     })
   }
 
@@ -138,7 +117,6 @@ export class MoodleClient extends EventEmitter {
      * UUID for logging, if not specified a new one will be generated, passed only when retrying
      */
     callUID = generateUID(),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any> {
     debug(`API call [${callUID}] to function: ${wsfunction}`)
     if (data) debug(`    data: ${JSON.stringify(data)}`)
@@ -148,30 +126,38 @@ export class MoodleClient extends EventEmitter {
       return
     }
     try {
+      // Moodle's AJAX service endpoint: requires sesskey in the query string and MoodleSession cookie.
+      // The old wstoken REST endpoint (/webservice/rest/server.php) was replaced because the
+      // mobile app token flow it depended on is no longer available due to Polimi not feeling like it.
+      // Response is a JSON array; unwrap the first element's `data` field.
       const res = await got.post(
-        "https://webeep.polimi.it/webservice/rest/server.php",
+        `https://webeep.polimi.it/lib/ajax/service.php?sesskey=${loginManager.sesskey}`,
         {
           timeout: { request: 10000 },
-          form: {
-            wstoken: loginManager.token,
-            wsfunction,
-            moodlewsrestformat: "json",
-            moodlewssettingfilter: true,
-            moodlewssettinglang: "it", // TODO: to be changed for multilanguage
-            ...data,
+          json: [{ index: 0, methodname: wsfunction, args: data ?? {} }],
+          headers: {
+            Cookie: `MoodleSession=${loginManager.moodleSession}`,
           },
         },
       )
       const parsed = JSON.parse(res.body)
-      if (parsed.errorcode === "invalidtoken") {
-        debug(`Invalid token on call [${callUID}], requesting new token`)
-        const logged = await loginManager.createLoginWindow()
-        if (logged)
-          return await this.call(wsfunction, data, catchNetworkError, callUID)
+      const [result] = Array.isArray(parsed) ? parsed : [parsed]
+      if (result.error) {
+        const errorcode = result.exception?.errorcode ?? result.errorcode
+        debug(`API error on call [${callUID}]: ${errorcode}`)
+        // On session expiry attempt silent SSO refresh before prompting a visible login window.
+        if (errorcode === "sessionexpired" || errorcode === "invalidsesskey") {
+          const refreshed = await loginManager.silentRefresh()
+          if (refreshed)
+            return await this.call(wsfunction, data, catchNetworkError, callUID)
+          const logged = await loginManager.createLoginWindow()
+          if (logged)
+            return await this.call(wsfunction, data, catchNetworkError, callUID)
+        }
       } else {
         this.setConnected(true)
         debug(`API call [${callUID}] success`)
-        return parsed
+        return result.data
       }
     } catch (e) {
       delete e.timings // useless info to log
@@ -198,20 +184,6 @@ export class MoodleClient extends EventEmitter {
   }
 
   /**
-   * Get the user id, needed to retrieve the enrolled courses, also retrieves the user's full name
-   * @returns the user id
-   */
-  async getUserID(): Promise<number> {
-    const res = await this.call("core_webservice_get_site_info")
-    if (!res) throw new Error("Cannot retrieve userID, are you logged in?")
-    const { userid, fullname }: { userid: number; fullname: string } = res
-    this.username = fullname
-    this.emit("username", fullname)
-    this.userid = userid
-    return userid
-  }
-
-  /**
    * Retrieves the user's enrolled courses, should be called when it's critical to retrieve
    * the correct courses (e.g while searching for new files while syncing), in other cases (e.g
    * when displaying courses in the UI) use {@link getCourses}
@@ -221,17 +193,17 @@ export class MoodleClient extends EventEmitter {
    */
   async getCoursesWithoutCache(catchNetworkError = false): Promise<Course[]> {
     await storeIsReady()
-    const userid = this.userid ?? (await this.getUserID())
 
-    // once the store is initialized fetch and parse the courses
-    const courses: {
-      fullname: string
-      id: number
-    }[] = await this.call(
-      "core_enrol_get_users_courses",
-      { userid },
+    // core_enrol_get_users_courses is ajax:false (wstoken-only) and requires a userid we no longer
+    // fetch upfront (but can obtain from notifications).
+    // core_course_get_enrolled_courses_by_timeline_classification is ajax:true and is
+    // the preferred way mandated by Her Highness Polimi (and it also works without a userid).
+    const res: { courses: { fullname: string; id: number }[] } = await this.call(
+      "core_course_get_enrolled_courses_by_timeline_classification",
+      { classification: "all", limit: 0, offset: 0 },
       catchNetworkError,
     )
+    const courses = res?.courses ?? []
     const defaultNames = courses.map(c => getDefaultName(c.fullname))
     const c: Course[] = courses.map((c, i) => {
       const { id, fullname } = c
@@ -289,84 +261,198 @@ export class MoodleClient extends EventEmitter {
    * @param course the course object from {@link getCourses}
    * @returns a promise that resolve to an array with all the FileInfo objects
    */
+  /**
+   * Uses core_courseformat_get_state instead of core_course_get_contents.
+   * core_course_get_contents is ajax:false (wstoken-only), so it can't be called via
+   * lib/ajax/service.php. core_courseformat_get_state is ajax:true and returns the same
+   * course module data, but as a double-encoded JSON string containing `cm` and `section` arrays.
+   *
+   * Resources and folders are handled separately:
+   * - resource/risorsa: HEAD request → timemodified + Content-Type for filename
+   * - folder/cartella: GET page → parse pluginfile links → Range request per file
+   * All cm processing runs in parallel; filename deduplication runs after all resolve.
+   */
   async getFileInfos(course: Course): Promise<FileInfo[]> {
-    const contents: Contents = await this.call(
-      "core_course_get_contents",
+    const raw = await this.call(
+      "core_courseformat_get_state",
       { courseid: course.id },
       false,
     )
-    const files: FileInfo[] = []
+    // core_courseformat_get_state returns its payload as a double-encoded JSON string
+    const state: {
+      cm?: {
+        id: number
+        modname: string
+        name: string
+        url?: string
+        sectionid?: string | number
+        section?: string | number
+        uservisible: boolean | number
+      }[]
+      section?: { id: string | number; num: number; title: string }[]
+    } = typeof raw === "string" ? JSON.parse(raw) : raw
 
-    for (const contentGroup of contents) {
-      for (const module of contentGroup.modules) {
-        const { name: modulename, contents, modname } = module
-
-        // if the modname is excluded or if the module is empty, skip this module,
-        if (EXCLUDED_MODNAMES.includes(modname)) continue
-        if (!contents) continue
-
-        for (const file of contents) {
-          if (file.type !== "file") continue // only add files to the download (duh)
-
-          let {
-            filename,
-            filepath,
-            filesize,
-            fileurl,
-            timecreated,
-            timemodified,
-          } = file
-
-          // if the modname is 'resource' & the content is a single file, the modulename
-          // should be used in place of the filename, as thats how it's displayed on webeep
-          if (modname === "resource" && contents.length === 1) {
-            filename = modulename + path.extname(filename)
-          } else {
-            filepath = path.join(modulename, filepath)
-          }
-
-          // remove slashes from the filname to prevent subfolders
-          filename = filename.replace(/\//g, "_")
-          filename = filename.replace(/\\/g, "_")
-
-          // if the contentgroup is 'Materiali' or similar, do not create a subfolder, as many courses
-          // use it as the only folder with downloadable contents
-          filepath = contentGroup.name.toLowerCase().includes("material")
-            ? filepath
-            : path.join(contentGroup.name, filepath)
-
-          filepath = path.join(course.name, filepath)
-
-          // in the end sanitize the path removing all characters that cause a mess
-          filename = sanitizePath(filename)
-          filepath = sanitizePath(filepath)
-
-          // if there is a file with the same name in the same folder, add a number to the end
-          let i = 1
-          while (
-            files.find(f => f.filepath === filepath && f.filename === filename)
-          ) {
-            let basename = path.basename(filename, path.extname(filename))
-            // remove the old number
-            if (i > 1) basename = basename.slice(0, -3 - String(i - 1).length)
-            // reconstruct the filename
-            filename = `${basename} (${i})${path.extname(filename)}`
-            i++
-          }
-
-          files.push({
-            coursename: course.name,
-            filename,
-            filepath,
-            filesize,
-            fileurl,
-            timecreated,
-            timemodified,
-          })
-        }
-      }
+    if (!state?.cm) {
+      debug(`getFileInfos: no cm in state for course ${course.id}`)
+      return []
     }
 
+    debug(`getFileInfos: got ${state.cm.length} cms for course ${course.id}`)
+
+    const sectionTitles = new Map<string | number, string>(
+      (state.section ?? []).map(s => [s.id, s.title]),
+    )
+
+    const cookie = `MoodleSession=${loginManager.moodleSession}`
+    // Re-attach the session cookie on every redirect hop (redirect trap)
+    const cookieHook = [(opts: any) => { opts.headers["cookie"] = cookie }]
+    const baseOpts = {
+      headers: { cookie },
+      hooks: { beforeRedirect: cookieHook },
+      timeout: { request: 10000 },
+    }
+
+    // collect all file infos in parallel, deduplicate at the end
+    const undeduped: FileInfo[] = []
+
+    await Promise.all(state.cm.map(async cm => {
+      if (!cm.uservisible || !cm.url) return
+
+      // sectionid is the primary field; section is a legacy fallback seen on some courses
+      const cmSectionId = cm.sectionid ?? cm.section
+      const sectionTitle = sectionTitles.get(cmSectionId) ?? sectionTitles.get(String(cmSectionId)) ?? ""
+      // courses where the section is named 'Materiali' or similar skip the section subfolder
+      const basepath = sanitizePath(
+        sectionTitle.toLowerCase().includes("material")
+          ? course.name
+          : path.join(course.name, sectionTitle),
+      )
+
+      if (["resource", "risorsa"].includes(cm.modname.toLowerCase())) {
+        try {
+          const moduleUrl = cm.url.replace(/&amp;/g, "&")
+          const resp = await got.head(moduleUrl, baseOpts)
+          let fileurl = resp.url
+
+          if (!fileurl.includes("pluginfile.php")) {
+            // Embedded file: the redirect landed on a page, parse it for the real link
+            const page = await got(moduleUrl, baseOpts)
+            const match =
+              page.body.match(/<object[^>]+data="([^"]*pluginfile\.php[^"]*)"/) ??
+              page.body.match(/<a[^>]+href="([^"]*pluginfile\.php[^"]*)"/)
+            if (!match) {
+              debug(`getFileInfos: no pluginfile link in "${cm.name}", skipping`)
+              return
+            }
+            fileurl = match[1].replace(/&amp;/g, "&")
+          }
+
+          const lastMod = resp.headers["last-modified"]
+          const timemodified = lastMod ? Math.floor(new Date(lastMod).getTime() / 1000) : 0
+
+          // use module display name + extension from Content-Type (original behaviour)
+          const contentType = (resp.headers["content-type"] ?? "").split(";")[0].trim()
+          const ext = contentType ? "." + (mimeExtension(contentType) || "") : ""
+          const filename = sanitizePath((cm.name + ext).replace(/[/\\]/g, "_"))
+
+          // filesize is 0 here, fetched lazily during download for live progress updates
+          undeduped.push({
+            coursename: course.name,
+            filename,
+            filepath: basepath,
+            filesize: 0,
+            fileurl,
+            timecreated: timemodified,
+            timemodified,
+          })
+        } catch (e) {
+          debug(`getFileInfos: failed to resolve resource "${cm.name}": ${e.message}`)
+        }
+      } else if (["folder", "cartella"].includes(cm.modname.toLowerCase())) {
+        try {
+          const folderUrl = cm.url.replace(/&amp;/g, "&")
+          const page = await got(folderUrl, baseOpts)
+          const folderPath = sanitizePath(path.join(basepath, cm.name))
+
+          const linkRe = /href="(https?:\/\/[^"]*pluginfile\.php[^"]*forcedownload=1[^"]*)"/g
+          const folderFileUrls: string[] = []
+          let match
+          while ((match = linkRe.exec(page.body)) !== null) {
+            folderFileUrls.push(match[1].replace(/&amp;/g, "&"))
+          }
+
+          await Promise.all(
+            folderFileUrls.map(async fileurl => {
+              // Use stream + early abort so we only read headers, never the body.
+              // A plain got() call with Range would download the full file if the server
+              // ignores the Range header and responds with 200.
+              const { filesize, timemodified } = await new Promise<{
+                filesize: number
+                timemodified: number
+              }>((resolve, reject) => {
+                const req = (got.stream as any)(fileurl, {
+                  ...baseOpts,
+                  headers: { ...baseOpts.headers, range: "bytes=0-0" },
+                })
+                req.once("response", (resp: any) => {
+                  const contentRange: string = resp.headers["content-range"] ?? ""
+                  const filesize = contentRange
+                    ? parseInt(contentRange.split("/").pop(), 10)
+                    : 0
+                  const lastMod: string = resp.headers["last-modified"] ?? ""
+                  const timemodified = lastMod
+                    ? Math.floor(new Date(lastMod).getTime() / 1000)
+                    : 0
+                  req.destroy()
+                  resolve({ filesize: isNaN(filesize) ? 0 : filesize, timemodified })
+                })
+                req.once("error", (e: Error) => {
+                  // ignore body-abort errors triggered by destroy()
+                  if (e.message?.includes("aborted") || (e as any).code === "ERR_STREAM_DESTROYED") {
+                    resolve({ filesize: 0, timemodified: 0 })
+                  } else {
+                    reject(e)
+                  }
+                })
+              }).catch(e => {
+                debug(`getFileInfos: range request failed for ${fileurl}: ${e.message}`)
+                return { filesize: 0, timemodified: 0 }
+              })
+
+              const filename = sanitizePath(
+                decodeURIComponent(path.basename(new URL(fileurl).pathname)).replace(/[/\\]/g, "_"),
+              )
+
+              undeduped.push({
+                coursename: course.name,
+                filename,
+                filepath: folderPath,
+                filesize,
+                fileurl,
+                timecreated: timemodified,
+                timemodified,
+              })
+            }),
+          )
+        } catch (e) {
+          debug(`getFileInfos: failed to parse folder "${cm.name}": ${e.message}`)
+        }
+      }
+    }))
+
+    // deduplicate filenames per-directory after all parallel requests complete
+    const files: FileInfo[] = []
+    for (const file of undeduped) {
+      let i = 1
+      let deduped = file.filename
+      while (files.find(f => f.filepath === file.filepath && f.filename === deduped)) {
+        const base = path.basename(file.filename, path.extname(file.filename))
+        const trimmed = i > 1 ? base.slice(0, -(3 + String(i - 1).length)) : base
+        deduped = `${trimmed} (${i})${path.extname(file.filename)}`
+        i++
+      }
+      files.push({ ...file, filename: deduped })
+    }
     return files
   }
 
@@ -383,6 +469,7 @@ export class MoodleClient extends EventEmitter {
       const nots: {
         notifications: {
           id: number
+          useridto: number
           subject: string
           fullmessage: string
           fullmessagehtml: string
@@ -397,6 +484,12 @@ export class MoodleClient extends EventEmitter {
         { useridto: 0 },
         false,
       )
+
+      // core_webservice_get_site_info (the old source of userid) is ajax:false.
+      // message_popup_get_popup_notifications includes useridto on each notification,
+      // so we extract it here as a side-effect, it's the only ajax:true way to get our own userid lmao.
+      if (!this.userid && nots.notifications.length > 0)
+        this.userid = nots.notifications[0].useridto
 
       const notifications: MoodleNotification[] = nots.notifications
         .filter(n => n.eventtype === "posts")
@@ -461,8 +554,10 @@ export class MoodleClient extends EventEmitter {
       return n
     })
     this.emit("notifications", this.cachedNotifications) // notify the frontend
+    // timecreatedto is required; without it the server ignores the call silently.
     await this.call("core_message_mark_all_notifications_as_read", {
-      useridto: this.userid,
+      useridto: this.userid ?? 0,
+      timecreatedto: Math.floor(Date.now() / 1000),
     })
   }
 }

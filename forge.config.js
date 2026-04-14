@@ -7,22 +7,21 @@ module.exports = {
   packagerConfig: {
     icon: path.resolve(__dirname, "static/icons/icon"),
     appBundleId: "org.polinetwork.webeep-sync",
-    osxSign: {
-      identity:
-        process.env.MACOS_IDENTITY ||
-        "Developer ID Application: PoliNetwork APS (842636PS9J)",
+    // signing and notarization are optional, I don't care enough about macos to waste time figuring out how to build it with a cert
+    osxSign: process.env.MACOS_IDENTITY ? {
+      identity: process.env.MACOS_IDENTITY,
       "hardened-runtime": true,
       entitlements: "entitlements.plist",
       "entitlements-inherit": "entitlements.plist",
       "signature-flags": "library",
       "gatekeeper-assess": false,
-    },
-    osxNotarize: {
+    } : undefined,
+    osxNotarize: process.env.APPLEID ? {
       appleId: process.env.APPLEID,
       appleIdPassword: process.env.APPLEPWD,
       teamId: process.env.TEAMID,
       ascProvider: process.env.TEAMID,
-    },
+    } : undefined,
   },
   makers: [
     {
@@ -128,7 +127,7 @@ module.exports = {
       config: {
         repository: {
           name: "webeep-sync",
-          owner: "toto04",
+          owner: "invy55",
         },
         prerelease: !!process.env.PRERELEASE,
         draft: true,

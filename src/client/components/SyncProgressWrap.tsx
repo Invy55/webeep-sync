@@ -35,23 +35,25 @@ export const SyncProgressWrap: FC<{ progress: Progress }> = props => {
             </span>
           </div>
           <span className="right">
-            {`${formatSize(progress.files[0].downloaded)} / ${formatSize(
-              progress.files[0].total,
-            )} (${Math.floor(filePercentage * 100)}%)`}
+            {/* Show '??' if file size is unknown, lazily resolved during download */}
+            {ftot > 0
+              ? `${formatSize(fdown)} / ${formatSize(ftot)} (${Math.floor(filePercentage * 100)}%)`
+              : `${formatSize(fdown)} / ??`}
           </span>
         </div>
-        <PrograssBar progress={filePercentage} />
+        {ftot > 0 && <PrograssBar progress={filePercentage} />}
       </div>
 
-      <div>
-        <h3>{t("total")}</h3>
-        <span className="right">
-          {`${formatSize(progress.downloaded)} / ${formatSize(
-            progress.total,
-          )} (${Math.floor(percentage * 100)}%)`}
-        </span>
-        <PrograssBar progress={percentage} />
-      </div>
+      {/* Only show total bar once the aggregate size is known (may result in a delay on unknown-size files) */}
+      {progress.total > 0 && (
+        <div>
+          <h3>{t("total")}</h3>
+          <span className="right">
+            {`${formatSize(progress.downloaded)} / ${formatSize(progress.total)} (${Math.floor(percentage * 100)}%)`}
+          </span>
+          <PrograssBar progress={percentage} />
+        </div>
+      )}
     </div>
   )
 }
