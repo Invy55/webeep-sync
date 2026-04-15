@@ -462,16 +462,28 @@ export class MoodleClient extends EventEmitter {
                   return { filesize: 0, timemodified: 0 }
                 })
 
+                // pluginfile.php URL structure:
+                // /pluginfile.php/{contextId}/{component}/{filearea}/{itemid}/{...relativePath}
+                // Everything after the 5th segment is the relative path inside the folder,
+                // which may include subfolders (e.g. "Prima sessione/lab_FdA_script.m").
+                const urlPath = decodeURIComponent(new URL(fileurl).pathname)
+                const parts = urlPath.split("/").filter(Boolean)
+                const relParts = parts.slice(5) // skip: pluginfile.php, contextId, component, filearea, itemid
                 const filename = sanitizePath(
-                  decodeURIComponent(
-                    path.basename(new URL(fileurl).pathname),
-                  ).replace(/[/\\]/g, "_"),
+                  relParts[relParts.length - 1].replace(/[/\\]/g, "_"),
                 )
+                const subfolderParts = relParts
+                  .slice(0, -1)
+                  .map(p => sanitizePath(p))
+                const filepath =
+                  subfolderParts.length > 0
+                    ? path.join(folderPath, ...subfolderParts)
+                    : folderPath
 
                 undeduped.push({
                   coursename: course.name,
                   filename,
-                  filepath: folderPath,
+                  filepath,
                   filesize,
                   fileurl,
                   timecreated: timemodified,
