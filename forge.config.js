@@ -159,6 +159,28 @@ module.exports = {
       // download an unsigned .exe from the internet, but it's ok if you unzip it first
       let winRelease = makeResults.find(m => m.platform === "win32")
       if (winRelease) {
+        const arch = winRelease.arch
+        const suffix = arch === "arm64" ? "-arm64" : ""
+        console.log(`Processing Windows ${arch} installer...`)
+
+        // For ARM64, rename .exe and .nupkg to include -arm64 suffix so they
+        // don't collide with the x64 artifacts on the same GitHub release.
+        if (suffix) {
+          winRelease.artifacts = winRelease.artifacts.map((art, i) => {
+            if (art.endsWith(".exe") || art.endsWith(".nupkg")) {
+              const ext = path.extname(art)
+              const newName = path.resolve(
+                path.dirname(art),
+                path.basename(art, ext) + suffix + ext,
+              )
+              console.log(`Renaming ${art} to ${newName}`)
+              fs.renameSync(art, newName)
+              return newName
+            }
+            return art
+          })
+        }
+
         let zipPath // will be set to the .zip file, will be used for new artifact array
         console.log("Zipping exe installer...")
         winRelease.artifacts.forEach(art => {
