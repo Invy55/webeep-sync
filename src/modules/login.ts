@@ -38,7 +38,7 @@ class LoginManager extends EventEmitter {
 
     // reads the session file, if the file exists, decrypts the content and restores the session
     fs.readFile(sessionPath)
-      .then(enc => {
+      .then(async enc => {
         const stored: StoredSession = JSON.parse(safeStorage.decryptString(enc))
         // check expiry before restoring to avoid sesskey errors on first API call
         if (stored.expiresAt > Date.now()) {
@@ -48,7 +48,10 @@ class LoginManager extends EventEmitter {
           this.username = stored.username
           this.isLogged = true
         } else {
-          log("previous session expired")
+          log("previous session expired, attempting silent refresh...")
+          await app.whenReady()
+          const refreshed = await this.silentRefresh()
+          if (!refreshed) log("silent refresh failed, user must re-login")
         }
       })
       .catch(() => log("session not found"))
@@ -222,11 +225,11 @@ class LoginManager extends EventEmitter {
         resolve(result)
       }
 
-      // 20s covers the full SAML redirect chain; if we haven't reached /my/ by then, give up
+      // 30s covers the full SAML redirect chain including slow SSO auto-submit
       const timeout = setTimeout(() => {
         debug("silentRefresh timed out")
         cleanup(false)
-      }, 20000)
+      }, 30000)
 
       win.webContents.on("did-finish-load", async () => {
         const url = win.webContents.getURL()
@@ -246,7 +249,7 @@ class LoginManager extends EventEmitter {
         }
 
         // If navigation has stalled on the AunicaLogin form, SSO cookies are expired.
-        // Wait 3 seconds, if still on the same page, the auto-submit did not fire.
+        // Wait 10 seconds, the SSO auto-submit can take several seconds on slow connections.
         if (url.includes("aunicalogin.jsp")) {
           setTimeout(() => {
             if (
@@ -258,7 +261,7 @@ class LoginManager extends EventEmitter {
               clearTimeout(timeout)
               cleanup(false)
             }
-          }, 3000)
+          }, 10000)
         }
       })
 

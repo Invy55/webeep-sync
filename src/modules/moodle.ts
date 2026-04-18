@@ -414,53 +414,20 @@ export class MoodleClient extends EventEmitter {
 
             await Promise.all(
               folderFileUrls.map(async fileurl => {
-                // Use stream + early abort so we only read headers, never the body.
-                // A plain got() call with Range would download the full file if the server
-                // ignores the Range header and responds with 200.
-                const { filesize, timemodified } = await new Promise<{
-                  filesize: number
-                  timemodified: number
-                }>((resolve, reject) => {
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const req = (got.stream as any)(fileurl, {
-                    ...baseOpts,
-                    headers: { ...baseOpts.headers, range: "bytes=0-0" },
+                // HEAD is faster than Range: bytes=0-0 — we only need Last-Modified for
+                // change detection; filesize is fetched lazily during download.
+                const headResp = await got
+                  .head(fileurl, baseOpts)
+                  .catch((e: Error): null => {
+                    debug(
+                      `getFileInfos: HEAD failed for ${fileurl}: ${e.message}`,
+                    )
+                    return null
                   })
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  req.once("response", (resp: any) => {
-                    const contentRange: string =
-                      resp.headers["content-range"] ?? ""
-                    const filesize = contentRange
-                      ? parseInt(contentRange.split("/").pop(), 10)
-                      : 0
-                    const lastMod: string = resp.headers["last-modified"] ?? ""
-                    const timemodified = lastMod
-                      ? Math.floor(new Date(lastMod).getTime() / 1000)
-                      : 0
-                    req.destroy()
-                    resolve({
-                      filesize: isNaN(filesize) ? 0 : filesize,
-                      timemodified,
-                    })
-                  })
-                  req.once("error", (e: Error) => {
-                    // ignore body-abort errors triggered by destroy()
-                    if (
-                      e.message?.includes("aborted") ||
-                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                      (e as any).code === "ERR_STREAM_DESTROYED"
-                    ) {
-                      resolve({ filesize: 0, timemodified: 0 })
-                    } else {
-                      reject(e)
-                    }
-                  })
-                }).catch(e => {
-                  debug(
-                    `getFileInfos: range request failed for ${fileurl}: ${e.message}`,
-                  )
-                  return { filesize: 0, timemodified: 0 }
-                })
+                const lastMod = headResp?.headers["last-modified"] ?? ""
+                const timemodified = lastMod
+                  ? Math.floor(new Date(lastMod).getTime() / 1000)
+                  : 0
 
                 // pluginfile.php URL structure:
                 // /pluginfile.php/{contextId}/{component}/{filearea}/{itemid}/{...relativePath}
@@ -484,7 +451,7 @@ export class MoodleClient extends EventEmitter {
                   coursename: course.name,
                   filename,
                   filepath,
-                  filesize,
+                  filesize: 0,
                   fileurl,
                   timecreated: timemodified,
                   timemodified,
