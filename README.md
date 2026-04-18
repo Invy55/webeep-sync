@@ -16,6 +16,8 @@ I termini di servizio di WeBeep ([consultabili qui](https://webeep.polimi.it/adm
 
 ## Cosa è cambiato tecnicamente
 
+Per i dettagli tecnici su come funziona il login, le chiamate API e il download, c'è [TECNICISMI.md](TECNICISMI.md).
+
 - **Autenticazione**: rimpiazzata l'API REST wstoken con sessione cookie + sesskey. Il login cattura `MoodleSession` e `sesskey` direttamente dalla pagina Moodle dopo il completamento dell'SSO. Le sessioni vengono salvate cifrate e rinnovate silenziosamente quando possibile.
 - **Ricerca file nei corsi**: rimpiazzato `core_course_get_contents` (ajax:false, solo wstoken) con `core_courseformat_get_state` (ajax:true). I file singoli vengono risolti tramite redirect following con richieste HEAD; le cartelle tramite parsing della pagina e range request per ottenere dimensione (e data di modifica).
 - **Lista corsi**: rimpiazzato `core_enrol_get_users_courses` (ajax:false, richiede userid) con `core_course_get_enrolled_courses_by_timeline_classification` (ajax:true, nessun userid necessario).
