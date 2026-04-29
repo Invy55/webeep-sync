@@ -32,13 +32,14 @@ class LoginManager extends EventEmitter {
   isLogged = false
 
   loginWindow?: BrowserWindow
+  private _loginPromise: Promise<boolean> | null = null
 
   constructor() {
     super()
 
     // reads the session file, if the file exists, decrypts the content and restores the session
     fs.readFile(sessionPath)
-      .then(async enc => {
+      .then(enc => {
         const stored: StoredSession = JSON.parse(safeStorage.decryptString(enc))
         // check expiry before restoring to avoid sesskey errors on first API call
         if (stored.expiresAt > Date.now()) {
@@ -48,10 +49,7 @@ class LoginManager extends EventEmitter {
           this.username = stored.username
           this.isLogged = true
         } else {
-          log("previous session expired, attempting silent refresh...")
-          await app.whenReady()
-          const refreshed = await this.silentRefresh()
-          if (!refreshed) log("silent refresh failed, user must re-login")
+          log("previous session expired")
         }
       })
       .catch(() => log("session not found"))
@@ -198,6 +196,23 @@ class LoginManager extends EventEmitter {
   }
 
   /**
+   * Ensures the user is logged in. Resolves immediately if already logged in.
+   * Otherwise attempts a silent refresh first; if that fails, opens the visible login window.
+   * Concurrent callers share the same in-flight promise so only one flow runs at a time.
+   */
+  ensureLoggedIn(): Promise<boolean> {
+    if (this.isLogged) return Promise.resolve(true)
+    if (!this._loginPromise) {
+      this._loginPromise = this.silentRefresh()
+        .then(ok => (ok ? true : this.createLoginWindow()))
+        .finally(() => {
+          this._loginPromise = null
+        })
+    }
+    return this._loginPromise
+  }
+
+  /**
    * Attempts to silently refresh the MoodleSession and sesskey using the existing SSO cookies
    * stored in the Electron session, without opening a visible browser window.
    *
@@ -225,11 +240,11 @@ class LoginManager extends EventEmitter {
         resolve(result)
       }
 
-      // 30s covers the full SAML redirect chain including slow SSO auto-submit
+      // 20s covers the full SAML redirect chain; if we haven't reached /my/ by then, give up
       const timeout = setTimeout(() => {
         debug("silentRefresh timed out")
         cleanup(false)
-      }, 30000)
+      }, 20000)
 
       win.webContents.on("did-finish-load", async () => {
         const url = win.webContents.getURL()
@@ -240,6 +255,7 @@ class LoginManager extends EventEmitter {
           try {
             await this.extractAndSaveSession(win.webContents)
             log("Silent refresh successful")
+            this.emit("session")
             cleanup(true)
           } catch (e) {
             debug("Silent refresh failed to extract session: " + e)
@@ -249,7 +265,7 @@ class LoginManager extends EventEmitter {
         }
 
         // If navigation has stalled on the AunicaLogin form, SSO cookies are expired.
-        // Wait 10 seconds, the SSO auto-submit can take several seconds on slow connections.
+        // Wait 3 seconds, if still on the same page, the auto-submit did not fire.
         if (url.includes("aunicalogin.jsp")) {
           setTimeout(() => {
             if (
@@ -261,7 +277,7 @@ class LoginManager extends EventEmitter {
               clearTimeout(timeout)
               cleanup(false)
             }
-          }, 10000)
+          }, 3000)
         }
       })
 
